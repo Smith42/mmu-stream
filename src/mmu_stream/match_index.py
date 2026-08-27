@@ -1,4 +1,4 @@
-"""Read legacy and ADR 0013 match indexes through one small interface."""
+"""Read legacy and hub-and-spoke match indexes through one small interface."""
 
 from __future__ import annotations
 

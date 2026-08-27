@@ -1,4 +1,4 @@
-"""Build one pointer-only ADR 0013 spoke index off the single Legacy anchor.
+"""Build one pointer-only spoke index off a single HATS hub.
 
 LSDB is confined to this offline builder, and the positional join is LSDB's
 own default: ``anchor.crossmatch(spoke)`` — KdTree, one neighbour, 1 arcsec.

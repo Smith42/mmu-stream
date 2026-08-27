@@ -1,4 +1,4 @@
-"""Offline checks for the shared ADR 0013 match-index builder."""
+"""Offline checks for the shared hub-and-spoke match-index builder."""
 
 from types import SimpleNamespace
 

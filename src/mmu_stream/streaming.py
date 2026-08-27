@@ -119,11 +119,10 @@ SPLIT_BUCKETS = 20
 MATCH_INDEX_ENV = "ASTROPT3_MATCH_INDEX"
 
 _IMAGE_SCALARS = ("ebv", "flux_g", "flux_r", "flux_z", "z_spec")
-# ADR 0014 A8: anchor columns already on the wire (0.01 MB against 645 MB of
-# pixels) that now carry loss-bearing scalar targets. fiberflux correlates
-# only 0.64-0.67 with flux_*, so it is aperture concentration, not a rescale;
-# psfdepth is an observing condition, included by owner decision with the
-# caveat recorded in A8.
+# Anchor columns already on the wire (0.01 MB against 645 MB of pixels) that
+# carry loss-bearing scalar targets. fiberflux correlates only 0.64-0.67 with
+# flux_*, so it is aperture concentration, not a rescale; psfdepth is an
+# observing condition.
 _ANCHOR_FREE_SCALARS = (
     "fiberflux_g",
     "fiberflux_r",
@@ -132,28 +131,28 @@ _ANCHOR_FREE_SCALARS = (
     "psfdepth_r",
     "psfdepth_z",
 )
-# ADR 0014 §6/A7: the HSC image struct is band/flux/ivar/mask/psf_fwhm/scale.
-# `ivar` alone is 47.0% of every HSC partition and is read nowhere, so project
-# down to the two leaves attach_source actually consumes (`mask` measures
-# 0.001% — free either way, but there is no reason to ask for it). HSC's own
-# psf_fwhm stays off the wire: only the ANCHOR's is a scalar target (A8).
+# The HSC image struct is band/flux/ivar/mask/psf_fwhm/scale. `ivar` alone is
+# 47.0% of every HSC partition and is read nowhere, so project down to the two
+# leaves attach_source consumes (`mask` measures 0.001% — free either way, but
+# there is no reason to ask for it). HSC's own psf_fwhm stays off the wire:
+# only the anchor's is a scalar target.
 _HSC_IMAGE_LEAVES = ("flux", "band")
 _HSC_IMAGE_COLUMNS = [f"image.{leaf}" for leaf in _HSC_IMAGE_LEAVES]
-# A8: i-band only. Every one of these is duplicated across grizy at pairwise
-# correlations near 1 (extinction is exactly 1.0000), so one band IS the field.
+# i-band only. Every one of these is duplicated across grizy at pairwise
+# correlations near 1 (extinction is exactly 1.0000), so one band is the field.
 _HSC_SHAPE_MOMENTS = ("11", "22", "12")
 _HSC_FREE_SCALARS = (
     *[f"{band}_cmodel_mag" for band in "grizy"],
-    # magerr is fetched as a QUALITY PREDICATE and never becomes a target:
-    # median 0.004-0.013 mag, i.e. it is the noise itself (A8).
+    # magerr is fetched as a quality predicate and never becomes a target:
+    # median 0.004-0.013 mag, i.e. it is the noise itself.
     *[f"{band}_cmodel_magerr" for band in "grizy"],
     "i_extendedness_value",
     *[f"i_sdssshape_shape{m}" for m in _HSC_SHAPE_MOMENTS],
     *[f"i_sdssshape_psf_shape{m}" for m in _HSC_SHAPE_MOMENTS],
 )
-# ADR 0014 §6: project the spectrum struct's LEAVES, not the whole struct.
-# `ivar` is 41% of every spectrum row's bytes and is not read by the
-# streaming adapters (ADR 0007 normalization does not use it); pyarrow accepts
+# Project the spectrum struct's leaves, not the whole struct. `ivar` is 41% of
+# every spectrum row's bytes and is not read by the streaming adapters;
+# pyarrow accepts
 # dotted leaf paths in read_row_group(columns=...) and returns a struct
 # carrying only the children asked for. _spectrum_part whitelists the same
 # three, so an unprojected read path cannot smuggle ivar back in.
@@ -210,8 +209,8 @@ _ANCHOR_COLUMNS = [
     *_IMAGE_SCALARS,
     *_ANCHOR_FREE_SCALARS,
 ]
-# A7: Legacy's image struct is 99.97% `flux` — there is no second plane to
-# drop, so it is NOT projected. Measured null result, not an oversight.
+# Legacy's image struct is 99.97% `flux` — there is no second plane to drop,
+# so it is not projected.
 
 
 # -- decode: hub row -> record dict ------------------------------------------
@@ -281,10 +280,10 @@ def _attach_spectrum(record: dict, row) -> None:
 
 
 def _attach_free_scalars(record: dict, row, predicates: dict) -> None:
-    """ADR 0014 A8: promote already-fetched columns to scalar targets.
+    """Promote already-fetched columns to scalar targets.
 
-    A field failing its predicate is OMITTED, never defaulted (ADR 0013
-    governance). Grouping is all-or-nothing downstream: ``_scalar_value``
+    A field failing its predicate is omitted, never defaulted. Grouping is
+    all-or-nothing downstream: ``_scalar_value``
     returns ``None`` if any of a modality's ``record_keys`` is absent, so a
     dropped band drops its whole span rather than poisoning it.
     """
@@ -315,8 +314,8 @@ def _attach_image(record: dict, row) -> None:
         if _finite(row.get(key)):
             record[key] = _as_float(row[key])
     _attach_free_scalars(record, row, _ANCHOR_SCALAR_PREDICATES)
-    # A8: seeing, one value per band, keyed BY BAND NAME rather than by
-    # position — the record already carries the band list, and a positional
+    # Seeing is one value per band, keyed by band name rather than by position.
+    # The record already carries the band list, and a positional
     # assumption would silently mis-key if a survey ever reorders its cube.
     fwhm = row["image"].get("psf_fwhm")
     if fwhm is not None and len(fwhm) == len(bands):
@@ -329,7 +328,7 @@ _HSC_MAX_MAGERR = 0.1
 
 
 def _attach_hsc_free_scalars(record: dict, row) -> None:
-    """ADR 0014 A8: HSC scalars from the partner row we already fetched.
+    """Attach HSC scalars from the partner row already fetched.
 
     ``cmodel_magerr`` is fetched but NEVER stored as a target — its median is
     0.004-0.013 mag, so it is the measurement noise, not a property of the
@@ -533,9 +532,8 @@ def is_source_graph(graph) -> bool:
 def assembly_and_revisions(match_index: str | None) -> tuple[str, dict]:
     """Resume-state tag plus the pinned source revisions behind it.
 
-    Both come from one ``load_source_graph`` read: ADR 0014 §5 fingerprints
-    the revisions alongside the assembly tag, and the graph is a 2M-row
-    parquet — loading it twice to answer two questions is not worth it.
+    Both come from one ``load_source_graph`` read. The graph is a 2M-row
+    parquet, so loading it twice to answer two questions is not worth it.
     """
     from pathlib import Path
 
