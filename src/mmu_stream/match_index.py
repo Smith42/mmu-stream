@@ -6,7 +6,17 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+import pyarrow.parquet as pq
+
 Cell = tuple[int, int]
+
+
+def as_number(value, kind, field: str):
+    """Coerce one raw value to int/float, rejecting junk uniformly."""
+    try:
+        return kind(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"invalid {field}: {value!r}") from error
 
 
 @dataclass
@@ -26,24 +36,17 @@ class MatchGraph:
     partner_cells: dict[Cell, dict[str, set[Cell]]]
 
 
-def _integer(value, field: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError(f"match index has invalid {field}") from error
-
-
 def _legacy(table: dict) -> MatchGraph:
     matches: dict[Cell, dict[str, dict[str, str]]] = {}
     partner_cells: dict[Cell, dict[str, set[Cell]]] = {}
     for index, anchor_id in enumerate(table["image_id"]):
         anchor_cell = (
-            _integer(table["image_order"][index], "image_order"),
-            _integer(table["image_pixel"][index], "image_pixel"),
+            as_number(table["image_order"][index], int, "image_order"),
+            as_number(table["image_pixel"][index], int, "image_pixel"),
         )
         partner_cell = (
-            _integer(table["spectrum_order"][index], "spectrum_order"),
-            _integer(table["spectrum_pixel"][index], "spectrum_pixel"),
+            as_number(table["spectrum_order"][index], int, "spectrum_order"),
+            as_number(table["spectrum_pixel"][index], int, "spectrum_pixel"),
         )
         matches.setdefault(anchor_cell, {}).setdefault(str(anchor_id), {})["desi"] = (
             str(table["spectrum_id"][index])
@@ -62,7 +65,7 @@ def _v3(table: dict) -> MatchGraph:
     rank at startup.
     """
     versions = {
-        _integer(value, "index_schema_version")
+        as_number(value, int, "index_schema_version")
         for value in table["index_schema_version"]
     }
     if versions != {3}:
@@ -84,8 +87,8 @@ def _v3(table: dict) -> MatchGraph:
     revisions: dict[str, str] = {}
     for index, anchor_id in enumerate(table["anchor_id"]):
         cell = (
-            _integer(table["anchor_order"][index], "anchor_order"),
-            _integer(table["anchor_pixel"][index], "anchor_pixel"),
+            as_number(table["anchor_order"][index], int, "anchor_order"),
+            as_number(table["anchor_pixel"][index], int, "anchor_pixel"),
         )
         spokes = matches.setdefault(cell, {}).setdefault(str(anchor_id), {})
         for source in sources:
@@ -111,8 +114,8 @@ def _v3(table: dict) -> MatchGraph:
             spokes[source] = str(partner_id)
             partner_cells.setdefault(cell, {}).setdefault(source, set()).add(
                 (
-                    _integer(table[f"{source}_order"][index], f"{source}_order"),
-                    _integer(table[f"{source}_pixel"][index], f"{source}_pixel"),
+                    as_number(table[f"{source}_order"][index], int, f"{source}_order"),
+                    as_number(table[f"{source}_pixel"][index], int, f"{source}_pixel"),
                 )
             )
     return MatchGraph(
@@ -127,7 +130,7 @@ def _v3(table: dict) -> MatchGraph:
 
 def _v2(table: dict) -> MatchGraph:
     versions = {
-        _integer(value, "index_schema_version")
+        as_number(value, int, "index_schema_version")
         for value in table["index_schema_version"]
     }
     if versions != {2}:
@@ -167,12 +170,12 @@ def _v2(table: dict) -> MatchGraph:
             raise ValueError(f"partner {source!r} mixes revisions")
         revisions[source] = revision
         anchor_cell = (
-            _integer(table["anchor_order"][index], "anchor_order"),
-            _integer(table["anchor_pixel"][index], "anchor_pixel"),
+            as_number(table["anchor_order"][index], int, "anchor_order"),
+            as_number(table["anchor_pixel"][index], int, "anchor_pixel"),
         )
         partner_cell = (
-            _integer(table["partner_order"][index], "partner_order"),
-            _integer(table["partner_pixel"][index], "partner_pixel"),
+            as_number(table["partner_order"][index], int, "partner_order"),
+            as_number(table["partner_pixel"][index], int, "partner_pixel"),
         )
         partners = matches.setdefault(anchor_cell, {}).setdefault(str(anchor_id), {})
         partner_id = str(table["partner_id"][index])
@@ -199,8 +202,6 @@ def load_source_graph(path: str | Path) -> MatchGraph:
     log or a README alongside the spokes, and handing those to pyarrow fails
     the whole load at train start.
     """
-    import pyarrow.parquet as pq
-
     local = Path(path)
     source: str | Path | list[Path] = path
     if local.is_dir():

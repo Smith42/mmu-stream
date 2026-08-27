@@ -41,6 +41,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .match_index import as_number
+
 INDEX_SCHEMA_VERSION = 2
 # lsdb suffixes the right side; the left keeps its own column names
 PARTNER_SUFFIX = "_spoke"
@@ -69,20 +71,6 @@ SCHEMA = pa.schema(
 # arrow-backed dtypes so an all-null via_* column stays int8/int64 instead of
 # degrading to float64 and mismatching the dask meta
 EMPTY_ROWS = SCHEMA.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
-
-
-def as_int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError(f"expected an integer, got {value!r}") from error
-
-
-def as_float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError(f"expected a number, got {value!r}") from error
 
 
 def normalize_id(value: Any, strip: bool = False) -> str:
@@ -114,10 +102,19 @@ def alignment_cells(anchor, partner) -> dict:
     mapping = align_catalogs(anchor, partner).pixel_mapping
     cells: dict = {}
     for row in mapping.itertuples(index=False):
-        aligned = (as_int(row.aligned_Norder), as_int(row.aligned_Npix))
+        aligned = (
+            as_number(row.aligned_Norder, int, "aligned_Norder"),
+            as_number(row.aligned_Npix, int, "aligned_Npix"),
+        )
         sides = (
-            (as_int(row.primary_Norder), as_int(row.primary_Npix)),
-            (as_int(row.join_Norder), as_int(row.join_Npix)),
+            (
+                as_number(row.primary_Norder, int, "primary_Norder"),
+                as_number(row.primary_Npix, int, "primary_Npix"),
+            ),
+            (
+                as_number(row.join_Norder, int, "join_Norder"),
+                as_number(row.join_Npix, int, "join_Npix"),
+            ),
         )
         if cells.setdefault(aligned, sides) != sides:
             raise ValueError(f"crossmatch partition {aligned} maps to two cells")
@@ -131,7 +128,10 @@ def _rows(pairs, pixel, args, cells):
     ``map_partitions(include_pixel=True)``.
     """
     rows = {name: [] for name in SCHEMA.names}
-    key = (as_int(pixel.order), as_int(pixel.pixel))
+    key = (
+        as_number(pixel.order, int, "pixel.order"),
+        as_number(pixel.pixel, int, "pixel.pixel"),
+    )
     if len(pairs) == 0 or key not in cells:
         return EMPTY_ROWS
     if DISTANCE_COLUMN not in pairs:
@@ -154,7 +154,9 @@ def _rows(pairs, pixel, args, cells):
                 row[f"{args.partner_id_column}{PARTNER_SUFFIX}"], args.partner_strip_id
             ),
             "join_kind": "positional",
-            "separation_arcsec": as_float(row[DISTANCE_COLUMN]),
+            "separation_arcsec": as_number(
+                row[DISTANCE_COLUMN], float, DISTANCE_COLUMN
+            ),
             "match_radius_arcsec": args.radius_arcsec,
             "epoch_treatment": args.epoch_treatment,
         }
@@ -168,7 +170,10 @@ def _rows(pairs, pixel, args, cells):
 def parse_cell(value: str) -> tuple[int, int]:
     try:
         order, pixel = value.split("/", 1)
-        return as_int(order), as_int(pixel)
+        return (
+            as_number(order, int, "cell order"),
+            as_number(pixel, int, "cell pixel"),
+        )
     except ValueError as error:
         raise argparse.ArgumentTypeError("cell must be ORDER/PIXEL") from error
 

@@ -21,6 +21,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .match_index import as_number
+
 WIDE_SCHEMA_VERSION = 3
 ANCHOR_FIELDS = [
     ("index_schema_version", pa.int16()),
@@ -48,13 +50,6 @@ def wide_schema(sources) -> pa.Schema:
     return pa.schema(fields)
 
 
-def _number(value, field: str, kind):
-    try:
-        return kind(value)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError(f"invalid {field}: {value!r}") from error
-
-
 def pivot(table: pa.Table) -> pa.Table:
     """Edge rows -> one row per anchor, a null block per absent spoke."""
     edges = table.to_pydict()
@@ -66,21 +61,21 @@ def pivot(table: pa.Table) -> pa.Table:
         anchor_revision.add(str(edges["anchor_revision"][index]))
         epoch.add(str(edges["epoch_treatment"][index]))
         key = (
-            _number(edges["anchor_order"][index], "anchor_order", int),
-            _number(edges["anchor_pixel"][index], "anchor_pixel", int),
+            as_number(edges["anchor_order"][index], int, "anchor_order"),
+            as_number(edges["anchor_pixel"][index], int, "anchor_pixel"),
             str(anchor_id),
         )
         source = str(edges["partner_source"][index])
         spoke = {
             "revision": str(edges["partner_revision"][index]),
             "id": str(edges["partner_id"][index]),
-            "order": _number(edges["partner_order"][index], "partner_order", int),
-            "pixel": _number(edges["partner_pixel"][index], "partner_pixel", int),
-            "separation_arcsec": _number(
-                edges["separation_arcsec"][index], "separation_arcsec", float
+            "order": as_number(edges["partner_order"][index], int, "partner_order"),
+            "pixel": as_number(edges["partner_pixel"][index], int, "partner_pixel"),
+            "separation_arcsec": as_number(
+                edges["separation_arcsec"][index], float, "separation_arcsec"
             ),
-            "match_radius_arcsec": _number(
-                edges["match_radius_arcsec"][index], "match_radius_arcsec", float
+            "match_radius_arcsec": as_number(
+                edges["match_radius_arcsec"][index], float, "match_radius_arcsec"
             ),
         }
         present = anchors.setdefault(key, {})

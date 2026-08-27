@@ -16,17 +16,23 @@ deterministically permuted per epoch.
 from __future__ import annotations
 
 import ast
-import importlib
 import json
 import math
 import os
 import warnings
 import zlib
-from typing import Any, cast
+from pathlib import Path
 
+import fsspec
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+from datasets import Features, IterableDataset
+from hats.io import paths as hats_paths
+from hats.loaders.read_hats import read_hats
 
-from .match_index import load_source_graph
+from .match_index import as_number, load_source_graph
 
 GWH_FRACTION_FIELDS = (
     "smooth-or-featured_smooth_fraction",
@@ -93,12 +99,10 @@ SOURCE_ID_COLUMNS = {
     "galaxies_validation": "dr8_id",
     "galaxies_test": "dr8_id",
 }
-CROSSMATCH_RADIUS_ARCSEC = 1.0
 IMAGE_SHAPE = (3, 152, 152)
 HSC_IMAGE_SHAPE = (5, 160, 160)
 UNMATCHED_SOURCES = {"desi", "sdss", "hsc"}
 
-MMU_ROOT = "mmu"
 # Bumped whenever the record ORDER changes, since a saved stream position is
 # an index into it: v2 bounded the unmatched-spectrum buffer (a fat cell's
 # overflow now leads the cell instead of trailing it), v3 deals partitions to
@@ -232,17 +236,7 @@ def _image_flux(value, expected_shape=IMAGE_SHAPE) -> np.ndarray:
 
 
 def _as_float(value) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"expected a numeric value, got {value!r}") from error
-
-
-def _as_int(value) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"expected an integer value, got {value!r}") from error
+    return as_number(value, float, "value")
 
 
 def _finite(value) -> bool:
@@ -279,31 +273,6 @@ def _attach_spectrum(record: dict, row) -> None:
         record["ZWARN"] = bool(row["ZWARN"])
 
 
-def _attach_free_scalars(record: dict, row, predicates: dict) -> None:
-    """Promote already-fetched columns to scalar targets.
-
-    A field failing its predicate is omitted, never defaulted. Grouping is
-    all-or-nothing downstream: ``_scalar_value``
-    returns ``None`` if any of a modality's ``record_keys`` is absent, so a
-    dropped band drops its whole span rather than poisoning it.
-    """
-    for key, predicate in predicates.items():
-        if _finite(row.get(key)) and predicate(_as_float(row[key])):
-            record[key] = _as_float(row[key])
-
-
-_ANCHOR_SCALAR_PREDICATES = {
-    **{
-        key: lambda value: True for key in ("fiberflux_g", "fiberflux_r", "fiberflux_z")
-    },
-    # ivar-like depth: log10(1+x) needs x >= 0, and 0 means no coverage
-    **{
-        key: lambda value: value > 0
-        for key in ("psfdepth_g", "psfdepth_r", "psfdepth_z")
-    },
-}
-
-
 def _attach_image(record: dict, row) -> None:
     bands = [str(b) for b in row["image"]["band"]]
     record["image"] = {
@@ -313,7 +282,16 @@ def _attach_image(record: dict, row) -> None:
     for key in _IMAGE_SCALARS:
         if _finite(row.get(key)):
             record[key] = _as_float(row[key])
-    _attach_free_scalars(record, row, _ANCHOR_SCALAR_PREDICATES)
+    # A scalar failing its check is omitted, never defaulted: downstream
+    # grouping is all-or-nothing, so a dropped band drops its whole span.
+    for key in _ANCHOR_FREE_SCALARS:
+        if not _finite(row.get(key)):
+            continue
+        value = _as_float(row[key])
+        # ivar-like depth: log10(1+x) needs x > 0, and 0 means no coverage
+        if key.startswith("psfdepth_") and value <= 0:
+            continue
+        record[key] = value
     # Seeing is one value per band, keyed by band name rather than by position.
     # The record already carries the band list, and a positional
     # assumption would silently mis-key if a survey ever reorders its cube.
@@ -455,19 +433,20 @@ def decode_record(row) -> dict:
 
 def catalog_files(url: str) -> tuple[list[str], dict]:
     """Return HEALPix-ordered parquet paths and a cell-to-path mapping."""
-    paths = cast(Any, importlib.import_module("hats.io.paths"))
-    read_hats = cast(Any, importlib.import_module("hats.loaders.read_hats")).read_hats
-
     collection = read_hats(url)
-    catalog = cast(Any, getattr(collection, "main_catalog", collection))
+    catalog = getattr(collection, "main_catalog", collection)
     files, by_cell = [], {}
     for pixel in catalog.get_healpix_pixels():
-        rel = str(paths.pixel_catalog_file(catalog.catalog_base_dir, pixel)).replace(
-            "hf://datasets/", "datasets/"
-        )
+        rel = str(
+            hats_paths.pixel_catalog_file(catalog.catalog_base_dir, pixel)
+        ).replace("hf://datasets/", "datasets/")
         path = "hf://" + rel
         files.append(path)
-        by_cell[(_as_int(pixel.order), _as_int(pixel.pixel))] = path
+        cell = (
+            as_number(pixel.order, int, "healpix order"),
+            as_number(pixel.pixel, int, "healpix pixel"),
+        )
+        by_cell[cell] = path
     return files, by_cell
 
 
@@ -529,33 +508,19 @@ def is_source_graph(graph) -> bool:
     return graph.schema_version in (2, 3) and set(graph.partner_revisions) != {"desi"}
 
 
-def assembly_and_revisions(match_index: str | None) -> tuple[str, dict]:
-    """Resume-state tag plus the pinned source revisions behind it.
-
-    Both come from one ``load_source_graph`` read. The graph is a 2M-row
-    parquet, so loading it twice to answer two questions is not worth it.
-    """
-    from pathlib import Path
-
+def source_assembly_for_index(match_index: str | None) -> str:
+    """Return the resume-state tag implied by a resolved pointer index."""
     resolved = resolve_match_index(match_index)
     if resolved is None or (
         not resolved.startswith("hf://") and not Path(resolved).exists()
     ):
-        return SOURCE_ASSEMBLY, {}
+        return SOURCE_ASSEMBLY
     graph = load_source_graph(resolved)
-    assembly = SOURCE_GRAPH_ASSEMBLY if is_source_graph(graph) else SOURCE_ASSEMBLY
-    revisions = {"anchor": graph.anchor_revision, **dict(graph.partner_revisions)}
-    return assembly, revisions
+    return SOURCE_GRAPH_ASSEMBLY if is_source_graph(graph) else SOURCE_ASSEMBLY
 
 
-def source_assembly_for_index(match_index: str | None) -> str:
-    """Return the resume-state tag implied by a resolved pointer index."""
-    return assembly_and_revisions(match_index)[0]
-
-
-def load_match_index(path: str):
-    """Compatibility view of a DESI-only index for the v3 stream."""
-    graph = load_source_graph(path)
+def _desi_view(graph):
+    """The DESI-only projection of a loaded graph for the v3 stream."""
     unsupported = set(graph.partner_revisions) - {"desi"}
     if unsupported:
         raise ValueError(
@@ -576,27 +541,24 @@ def load_match_index(path: str):
     return matches, spectra_of
 
 
+def load_match_index(path: str):
+    """Compatibility view of a DESI-only index for the v3 stream."""
+    return _desi_view(load_source_graph(path))
+
+
 # -- crossmatch dataset ------------------------------------------------------
 
 
-def _parquet_stream(files: list):
-    """Open parquet through datasets only to derive its published features."""
-    from datasets import load_dataset
-
-    return load_dataset(
-        "parquet", data_files=list(files), split="train", streaming=True
-    )
+def _published_features(path: str):
+    with fsspec.open(path, "rb") as handle:
+        return Features.from_arrow_schema(pq.ParquetFile(handle).schema_arrow)
 
 
 def union_features(image_file: str, spectrum_file: str):
     """Derive the raw image ∪ spectrum schema from the published catalogs."""
-    from datasets import Features
-
-    image = cast(Any, _parquet_stream([image_file])).features
-    spectrum = cast(Any, _parquet_stream([spectrum_file])).features
-    if image is None or spectrum is None:
-        raise ValueError("catalog parquet did not expose a feature schema")
-    return Features({**cast(dict, image), **cast(dict, spectrum)})
+    return Features(
+        {**_published_features(image_file), **_published_features(spectrum_file)}
+    )
 
 
 def _rows(parquet_file, columns=None):
@@ -622,11 +584,6 @@ def _crossmatch_examples(
     matched_spectra_ids,
 ):
     """Yield pairs, unmatched images, and globally unmatched spectra once."""
-    import fsspec
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    pc = cast(Any, importlib.import_module("pyarrow.compute"))
     paired_globally = pa.array(sorted(map(str, matched_spectra_ids)), type=pa.string())
     for image_path, raw, spectrum_paths, owned in zip(
         image_paths, match_json, spectra_paths, owned_spectra
@@ -721,8 +678,6 @@ def crossmatch_dataset(
     features,
 ):
     """Build the sharded raw crossmatch dataset from resolved partition paths."""
-    from datasets import IterableDataset
-
     return IterableDataset.from_generator(
         _crossmatch_examples,
         gen_kwargs={
@@ -744,9 +699,6 @@ def _source_graph_examples(
     matched_source_ids,
 ):
     """Yield one deterministic source-graph cell without materializing it."""
-    import fsspec
-    import pyarrow.parquet as pq
-
     globally_matched = {
         source: set(map(str, ids)) for source, ids in matched_source_ids.items()
     }
@@ -823,8 +775,6 @@ def source_graph_dataset(
     owned_source_paths,
     matched_source_ids,
 ):
-    from datasets import IterableDataset
-
     return IterableDataset.from_generator(
         _source_graph_examples,
         gen_kwargs={
@@ -956,19 +906,16 @@ def _spectrum_owners(spectra_paths_by_cell: dict) -> dict:
     for cell in sorted(spectra_paths_by_cell):
         for path in spectra_paths_by_cell[cell]:
             references.setdefault(path, []).append(cell)
+    all_cells = sorted(spectra_paths_by_cell)
     return {
-        path: cells[zlib.crc32(path.encode()) % len(cells)]
+        path: _partition_owner(path, cells, all_cells)
         for path, cells in references.items()
     }
 
 
 def _crossmatch_dataset(match_index, split, seed, epoch, shard, num_shards):
     graph = load_source_graph(match_index)
-    unsupported = set(graph.partner_revisions) - {"desi"}
-    if unsupported:
-        raise ValueError(
-            f"crossmatch_only_v3 cannot stream sources {sorted(unsupported)}"
-        )
+    matches, spectra_of = _desi_view(graph)
     image_catalog = IMAGES_CATALOG
     spectrum_catalog = SPECTRA_CATALOG
     # schema 1 carried no revisions; 2 and 3 both pin them
@@ -977,7 +924,6 @@ def _crossmatch_dataset(match_index, split, seed, epoch, shard, num_shards):
         spectrum_catalog += f"@{graph.partner_revisions['desi']}"
     image_files, image_by_cell = catalog_files(image_catalog)
     spectrum_files, spectrum_by_cell = catalog_files(spectrum_catalog)
-    matches, spectra_of = load_match_index(match_index)
 
     all_cells = sorted(matches)
     missing = [cell for cell in all_cells if cell not in image_by_cell]
