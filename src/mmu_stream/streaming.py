@@ -98,7 +98,6 @@ IMAGE_SHAPE = (3, 152, 152)
 HSC_IMAGE_SHAPE = (5, 160, 160)
 UNMATCHED_SOURCES = {"desi", "sdss", "hsc"}
 
-SYNTHETIC_ROOT = "synthetic"
 MMU_ROOT = "mmu"
 # Bumped whenever the record ORDER changes, since a saved stream position is
 # an index into it: v2 bounded the unmatched-spectrum buffer (a fat cell's
@@ -153,8 +152,8 @@ _HSC_FREE_SCALARS = (
     *[f"i_sdssshape_psf_shape{m}" for m in _HSC_SHAPE_MOMENTS],
 )
 # ADR 0014 §6: project the spectrum struct's LEAVES, not the whole struct.
-# `ivar` is 41% of every spectrum row's bytes and is read nowhere outside
-# synthetic.py (ADR 0007 normalization does not use it); pyarrow accepts
+# `ivar` is 41% of every spectrum row's bytes and is not read by the
+# streaming adapters (ADR 0007 normalization does not use it); pyarrow accepts
 # dotted leaf paths in read_row_group(columns=...) and returns a struct
 # carrying only the children asked for. _spectrum_part whitelists the same
 # three, so an unprojected read path cannot smuggle ivar back in.
@@ -295,9 +294,14 @@ def _attach_free_scalars(record: dict, row, predicates: dict) -> None:
 
 
 _ANCHOR_SCALAR_PREDICATES = {
-    **{key: lambda value: True for key in ("fiberflux_g", "fiberflux_r", "fiberflux_z")},
+    **{
+        key: lambda value: True for key in ("fiberflux_g", "fiberflux_r", "fiberflux_z")
+    },
     # ivar-like depth: log10(1+x) needs x >= 0, and 0 means no coverage
-    **{key: lambda value: value > 0 for key in ("psfdepth_g", "psfdepth_r", "psfdepth_z")},
+    **{
+        key: lambda value: value > 0
+        for key in ("psfdepth_g", "psfdepth_r", "psfdepth_z")
+    },
 }
 
 

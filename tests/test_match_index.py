@@ -135,7 +135,12 @@ def test_v2_spoke_directory_loads_as_one_source_graph(tmp_path):
         load_source_graph(directory)
     (directory / "bad.parquet").unlink()
 
-    invalid = {**common, "partner_source": "sdss", "partner_id": "x", "separation_arcsec": 2.0}
+    invalid = {
+        **common,
+        "partner_source": "sdss",
+        "partner_id": "x",
+        "separation_arcsec": 2.0,
+    }
     pq.write_table(
         pa.Table.from_pylist([invalid], schema=builder.SCHEMA),
         directory / "invalid.parquet",

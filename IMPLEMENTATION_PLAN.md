@@ -84,7 +84,6 @@ src/mmu_stream/streaming.py
 src/mmu_stream/match_index.py
 src/mmu_stream/build_match_index.py
 src/mmu_stream/merge_match_index.py
-tests/fake_mmu.py
 tests/test_streaming.py
 tests/test_match_index.py
 ```
@@ -151,32 +150,19 @@ Do not optimize, rename, generalize, or remove the legacy dispatch path in this 
 
 ## Phase 3 — Establish package-owned tests
 
-1. Copy stream- and index-owned tests from the reference branch.
+1. Copy only index validation and deterministic ownership tests from the reference branch.
 2. Update imports to `mmu_stream`.
-3. Create a package-local `tests/fake_mmu.py` that:
-   - writes deterministic local parquet in the real nested row shapes;
-   - uses the real `datasets` generator/interleave behavior;
-   - provides one hub and at least two spokes;
-   - includes hub-only, partially matched, fully matched, and eligible fetched-only rows.
-4. Keep AstroPT’s separate `tests/fake_mmu.py`; duplication is intentional and test-only.
-5. Keep these checks in the package:
+3. Do not create or maintain a synthetic/fake package stream. End-to-end row assembly and resume checks use the real catalog/index path and remain marked `network`.
+4. Keep these offline checks in the package:
    - schema-v2 builder schema, ID normalization, aligned cells, and empty/full dtype parity;
    - schema-v2 spoke-directory loading;
    - schema-v2/schema-v3 `MatchGraph` equivalence;
    - mixed revision, invalid separation/radius, non-positional join, and duplicate-spoke rejection;
-   - independent spoke attachment without a complete N-way match;
-   - absent spokes represented by absence/null;
-   - selected fetched-only rows emitted exactly once without standalone scans;
    - common spatial split and deterministic partition ownership;
-   - rank/worker disjointness and `n_shards`;
-   - exact mid-stream resume;
-   - missing indexed partner warning and skip behavior.
-6. Keep these checks in AstroPT:
-   - DESI/SDSS spectrum decoding and quality rules;
-   - Legacy/HSC image shapes and projections;
-   - PROVABGS and galaxies-with-hats scalar predicates;
-   - `ObjectSequencer` shapes, modality names, token maps, family loss, packing, eval, and model-forward behavior.
-7. Keep live catalog/index tests marked `network`; do not run them in default offline CI.
+   - rank ownership without dropped cells;
+   - legacy index compatibility and match-index resolution.
+5. Keep survey decoding, attachment, packing, resume, and model integration checks in AstroPT.
+6. Keep live catalog/index tests marked `network`; do not run them in default offline CI.
 
 Checks:
 
@@ -188,7 +174,7 @@ uv run python -m mmu_stream.merge_match_index --help
 uv run --extra index python -c "import lsdb, dask, pandas"
 ```
 
-**Exit:** Package offline tests pass without AstroPT installed.
+**Exit:** Package unit tests pass without AstroPT installed, and the package contains no synthetic stream fixture.
 
 ---
 
@@ -211,7 +197,7 @@ uv run --extra index python -c "import lsdb, dask, pandas"
 4. Retain `astropt3.data.streaming` as AstroPT’s adapter module. Initially make it a thin wrapper over the package parity interface so existing callers keep one local seam.
 5. Preserve the assembly/revision fingerprint exactly; a package move alone must not invalidate saved stream state.
 6. Update Astro tests and monkeypatch targets to cross the adapter seam or the package module deliberately.
-7. Retain AstroPT’s application fixture and `fixed_records`; make their stream primitives come through the adapter.
+7. Keep AstroPT application-level stream tests behind the adapter seam.
 8. Move the record-to-sequence live assertion into a small Astro integration test.
 9. Delete Astro’s duplicate engine/index implementation after cutover:
    - `src/astropt3/data/match_index.py`;
@@ -241,7 +227,7 @@ The thin adapter is deliberate: Phase 8 moves survey-specific interpretation beh
 - Hub rows attach every available spoke without requiring complete matches.
 - Eligible fetched-only rows are emitted exactly once and remain split/rank/worker disjoint.
 - Ineligible spokes do not emit unmatched rows.
-- Fixed fake and live streams preserve record order, values, `n_shards`, state, and exact continuation.
+- The live stream preserves record order, values, `n_shards`, state, and exact continuation.
 - Source assembly and revision fingerprints remain unchanged.
 
 ### AstroPT
@@ -261,7 +247,7 @@ Also verify:
 
 - nanotron loader shape/state tests;
 - retry/rebuild tests;
-- eval/generation fake-stream tests;
+- eval/generation stream-adapter tests;
 - source-distinct modality and family-loss tests;
 - live five-spoke record-to-sequence integration;
 - package Git pin is the intended immutable SHA;
@@ -337,7 +323,7 @@ Move these Astro-specific concerns into `astropt3.data.streaming` adapters:
 
 Do not add multi-hub mixing, spoke-to-spoke joins, arbitrary join graphs, plugin registration, alternate transports, source weights, standalone spoke scans, or Astro batching/retry behavior.
 
-Validate the generalized package with its local fake adapter and through the full AstroPT regression/parity gates. Documentation must state that arbitrary-hub support is experimental and validated only through AstroPT’s MMU source graph.
+Validate the generalized package through the live stream and the full AstroPT regression/parity gates. Documentation must state that arbitrary-hub support is experimental and validated only through AstroPT’s MMU source graph.
 
 Update AstroPT’s exact Git pin whenever generalized changes break the previous commit.
 
