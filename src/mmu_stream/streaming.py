@@ -508,15 +508,27 @@ def is_source_graph(graph) -> bool:
     return graph.schema_version in (2, 3) and set(graph.partner_revisions) != {"desi"}
 
 
-def source_assembly_for_index(match_index: str | None) -> str:
-    """Return the resume-state tag implied by a resolved pointer index."""
+def assembly_and_revisions(match_index: str | None) -> tuple[str, dict]:
+    """Resume-state tag plus the pinned source revisions behind it.
+
+    Both come from one ``load_source_graph`` read: downstream trainers
+    fingerprint the revisions alongside the assembly tag, and the graph is a
+    2M-row parquet — loading it twice to answer two questions is not worth it.
+    """
     resolved = resolve_match_index(match_index)
     if resolved is None or (
         not resolved.startswith("hf://") and not Path(resolved).exists()
     ):
-        return SOURCE_ASSEMBLY
+        return SOURCE_ASSEMBLY, {}
     graph = load_source_graph(resolved)
-    return SOURCE_GRAPH_ASSEMBLY if is_source_graph(graph) else SOURCE_ASSEMBLY
+    assembly = SOURCE_GRAPH_ASSEMBLY if is_source_graph(graph) else SOURCE_ASSEMBLY
+    revisions = {"anchor": graph.anchor_revision, **dict(graph.partner_revisions)}
+    return assembly, revisions
+
+
+def source_assembly_for_index(match_index: str | None) -> str:
+    """Return the resume-state tag implied by a resolved pointer index."""
+    return assembly_and_revisions(match_index)[0]
 
 
 def _desi_view(graph):
